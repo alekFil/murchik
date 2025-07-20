@@ -2,6 +2,9 @@ import os
 from dotenv import load_dotenv
 import boto3
 from botocore.config import Config
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import argparse
 
 load_dotenv()
 
@@ -20,20 +23,31 @@ s3_client = boto3.client(
     config=Config(s3={"addressing_style": "virtual"}),
 )
 
-def clear_bucket():
+def clear_bucket_multithreaded(max_workers=16):
     paginator = s3_client.get_paginator('list_objects_v2')
     to_delete = []
     for page in paginator.paginate(Bucket=STORAGE_BUCKET_NAME):
         for obj in page.get('Contents', []):
-            to_delete.append({'Key': obj['Key']})
+            to_delete.append(obj['Key'])
     if not to_delete:
         print("Бакет уже пуст.")
         return
-    # Удаляем по одному объекту (обход проблемы с Content-MD5)
-    for obj in to_delete:
-        s3_client.delete_object(Bucket=STORAGE_BUCKET_NAME, Key=obj['Key'])
-        print(f"Удалён: {obj['Key']}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(s3_client.delete_object, Bucket=STORAGE_BUCKET_NAME, Key=key) for key in to_delete]
+        with tqdm(total=len(futures), desc="Удаление файлов") as pbar:
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] {e}")
+                pbar.update(1)
     print("Очистка завершена.")
 
+def main():
+    parser = argparse.ArgumentParser(description="Очистка бакета S3")
+    parser.add_argument('--threads', type=int, default=16, help="Количество потоков для удаления (по умолчанию 16)")
+    args = parser.parse_args()
+    clear_bucket_multithreaded(max_workers=args.threads)
+
 if __name__ == '__main__':
-    clear_bucket() 
+    main() 
