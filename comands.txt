@@ -1,0 +1,13 @@
+python upload.py --upload C:\Users\filat\Documents\murchik\test_upload --exclude-from exclude.txt --quiet
+
+
+$env:SSL_CERT_FILE="C:\Users\filat\Documents\murchik\certs\_.s3.ru-1.storage.selcloud.ru.crt"
+
+python -m pip install --upgrade certifi
+
+
+python upload.py --upload C:\Users\filat\Documents\murchik\test_upload\threads --threads 32 --quiet
+python upload.py --upload C:\Users\filat\Documents\murchik\test_upload\bytes --threads 32 --quiet
+
+
+python download_restore.py --download C:\Users\filat\Documents\murchik\test_download --show-count
