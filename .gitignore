@@ -178,6 +178,7 @@ pyrightconfig.json
 # Custom
 
 test_upload/
+test_download/
 notes
 
 # End custom

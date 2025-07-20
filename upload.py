@@ -55,14 +55,20 @@ def get_file_md5(file_path):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
+def get_file_key(local_path):
+    import hashlib
+    with open(local_path, "rb") as f:
+        content = f.read()
+    key_md5 = hashlib.md5(content + local_path.encode('utf-8')).hexdigest()
+    return key_md5
+
 def upload_single_file(args):
-    root, filename, exclude_patterns, quiet = args
+    root, filename, exclude_patterns, quiet, pbar = args
     local_path = os.path.join(root, filename)
     if should_exclude(filename, exclude_patterns):
-        return ("[SKIP]", local_path)
+        return ("[SKIP]", local_path, 0)
 
-    file_md5 = get_file_md5(local_path)
-    file_key = file_md5
+    file_key = get_file_key(local_path)
     original_ext = os.path.splitext(filename)[1][1:]
     encoded_path = base64.b64encode(local_path.encode()).decode()
     metadata = {
@@ -71,16 +77,23 @@ def upload_single_file(args):
     }
     content_type, _ = mimetypes.guess_type(filename)
     content_type = content_type or 'application/octet-stream'
+    file_size = os.path.getsize(local_path)
 
     # Проверка, есть ли уже такой объект
     try:
         s3_client.head_object(Bucket=STORAGE_BUCKET_NAME, Key=file_key)
-        return ("[SKIP]", local_path)
+        if pbar:
+            pbar.update(file_size)
+        return ("[SKIP]", local_path, file_size)
     except ClientError as e:
         if e.response['Error']['Code'] != '404':
-            return (f"[ERROR] {e}", local_path)
+            if pbar:
+                pbar.update(file_size)
+            return (f"[ERROR] {e}", local_path, file_size)
     except Exception as e:
-        return (f"[ERROR] {e}", local_path)
+        if pbar:
+            pbar.update(file_size)
+        return (f"[ERROR] {e}", local_path, file_size)
 
     try:
         with open(local_path, 'rb') as f:
@@ -93,24 +106,39 @@ def upload_single_file(args):
                     'ContentType': content_type
                 }
             )
-        return ("[OK]", local_path)
+        if pbar:
+            pbar.update(file_size)
+        return ("[OK]", local_path, file_size)
     except Exception as e:
-        return (f"[ERROR] {e}", local_path)
+        if pbar:
+            pbar.update(file_size)
+        return (f"[ERROR] {e}", local_path, file_size)
+
 
 def upload_files_from_directories(directories, exclude_patterns, quiet=False, max_workers=16):
     all_files = []
+    total_size = 0
     for directory in directories:
         for root, _, files in os.walk(directory):
             for filename in files:
-                all_files.append((root, filename, exclude_patterns, quiet))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(upload_single_file, args) for args in all_files]
-        with tqdm(total=len(futures), desc="Загрузка файлов") as pbar:
+                local_path = os.path.join(root, filename)
+                if not should_exclude(filename, exclude_patterns):
+                    try:
+                        total_size += os.path.getsize(local_path)
+                    except Exception:
+                        pass
+                all_files.append((root, filename, exclude_patterns, quiet, None))
+    # tqdm по байтам
+    from functools import partial
+    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Загрузка данных") as pbar:
+        # Передаём pbar в каждый таск
+        tasks = [(root, filename, exclude_patterns, quiet, pbar) for (root, filename, exclude_patterns, quiet, _) in all_files]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(upload_single_file, args) for args in tasks]
             for future in as_completed(futures):
-                status, path = future.result()
+                status, path, size = future.result()
                 if not quiet and status != "[OK]":
                     print(f"{status} {path}")
-                pbar.update(1)
 
 def download_files_to_directories(destination_root):
     try:
