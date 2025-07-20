@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 from botocore.config import Config
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -54,72 +55,61 @@ def get_file_md5(file_path):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
-def upload_files_from_directories(directories, exclude_patterns, quiet=False):
+def upload_single_file(args):
+    root, filename, exclude_patterns, quiet = args
+    local_path = os.path.join(root, filename)
+    if should_exclude(filename, exclude_patterns):
+        return ("[SKIP]", local_path)
+
+    file_md5 = get_file_md5(local_path)
+    file_key = file_md5
+    original_ext = os.path.splitext(filename)[1][1:]
+    encoded_path = base64.b64encode(local_path.encode()).decode()
+    metadata = {
+        'original_path_b64': str(encoded_path),
+        'original_ext': str(original_ext)
+    }
+    content_type, _ = mimetypes.guess_type(filename)
+    content_type = content_type or 'application/octet-stream'
+
+    # Проверка, есть ли уже такой объект
+    try:
+        s3_client.head_object(Bucket=STORAGE_BUCKET_NAME, Key=file_key)
+        return ("[SKIP]", local_path)
+    except ClientError as e:
+        if e.response['Error']['Code'] != '404':
+            return (f"[ERROR] {e}", local_path)
+    except Exception as e:
+        return (f"[ERROR] {e}", local_path)
+
+    try:
+        with open(local_path, 'rb') as f:
+            s3_client.upload_fileobj(
+                f,
+                STORAGE_BUCKET_NAME,
+                file_key,
+                ExtraArgs={
+                    'Metadata': metadata,
+                    'ContentType': content_type
+                }
+            )
+        return ("[OK]", local_path)
+    except Exception as e:
+        return (f"[ERROR] {e}", local_path)
+
+def upload_files_from_directories(directories, exclude_patterns, quiet=False, max_workers=16):
+    all_files = []
     for directory in directories:
-        # Считаем общее количество файлов для прогресс-бара
-        all_files = []
         for root, _, files in os.walk(directory):
             for filename in files:
-                if not should_exclude(filename, exclude_patterns):
-                    all_files.append((root, filename))
-        with tqdm(total=len(all_files), desc=f"Загрузка из {directory}") as pbar:
-            for root, filename in all_files:
-                local_path = os.path.join(root, filename)
-                file_md5 = get_file_md5(local_path)
-                file_key = file_md5  # md5 как ключ
-                original_ext = os.path.splitext(filename)[1][1:]  # Без точки
-
-                encoded_path = base64.b64encode(local_path.encode()).decode()
-                metadata = {
-                    'original_path_b64': str(encoded_path),
-                    'original_ext': str(original_ext)
-                }
-
-                content_type, _ = mimetypes.guess_type(filename)
-                content_type = content_type or 'application/octet-stream'
-
-                # Проверка, есть ли уже такой объект
-                try:
-                    s3_client.head_object(Bucket=STORAGE_BUCKET_NAME, Key=file_key)
-                    if not quiet:
-                        print(f"[SKIP] {local_path} уже загружен (md5: {file_md5})")
-                    pbar.update(1)
-                    continue
-                except ClientError as e:
-                    if e.response['Error']['Code'] != '404':
-                        if not quiet:
-                            print(f"[ERROR] Ошибка при проверке существования {local_path}: {e}")
-                        pbar.update(1)
-                        continue
-                except Exception as e:
-                    if not quiet:
-                        print(f"[ERROR] Неожиданная ошибка при проверке {local_path}: {e}")
-                    pbar.update(1)
-                    continue
-
-                try:
-                    with open(local_path, 'rb') as f:
-                        s3_client.upload_fileobj(
-                            f,
-                            STORAGE_BUCKET_NAME,
-                            file_key,
-                            ExtraArgs={
-                                'Metadata': metadata,
-                                'ContentType': content_type
-                            }
-                        )
-                    if not quiet:
-                        print(f"Загружен файл: {local_path} -> {file_key} ({content_type})")
-                    # Отладочный вывод метаданных
-                    if not quiet:
-                        try:
-                            head = s3_client.head_object(Bucket=STORAGE_BUCKET_NAME, Key=file_key)
-                            print(f"[DEBUG] Метаданные в S3: {head.get('Metadata', {})}")
-                        except Exception as meta_e:
-                            print(f"[DEBUG] Не удалось получить метаданные: {meta_e}")
-                except Exception as e:
-                    if not quiet:
-                        print(f"[ERROR] Не удалось загрузить {local_path}: {e}")
+                all_files.append((root, filename, exclude_patterns, quiet))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(upload_single_file, args) for args in all_files]
+        with tqdm(total=len(futures), desc="Загрузка файлов") as pbar:
+            for future in as_completed(futures):
+                status, path = future.result()
+                if not quiet and status != "[OK]":
+                    print(f"{status} {path}")
                 pbar.update(1)
 
 def download_files_to_directories(destination_root):
@@ -159,6 +149,7 @@ def main():
     parser.add_argument('--exclude-patterns', nargs='*', default=[], help="Шаблоны файлов для исключения")
     parser.add_argument('--exclude-from', help="Файл с шаблонами исключений (один на строку)")
     parser.add_argument('--quiet', action='store_true', help="Тихий режим: только прогресс-бар без лишних сообщений")
+    parser.add_argument('--threads', type=int, default=16, help="Количество потоков для параллельной загрузки (по умолчанию 16)")
 
     args = parser.parse_args()
 
@@ -168,7 +159,7 @@ def main():
         exclude_patterns.extend(file_patterns)
 
     if args.upload:
-        upload_files_from_directories(args.upload, exclude_patterns, quiet=args.quiet)
+        upload_files_from_directories(args.upload, exclude_patterns, quiet=args.quiet, max_workers=args.threads)
     elif args.download:
         download_files_to_directories(args.download)
     else:
