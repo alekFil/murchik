@@ -57,10 +57,12 @@ def get_file_md5(file_path):
 
 def get_file_key(local_path):
     import hashlib
+    hash_md5 = hashlib.md5()
     with open(local_path, "rb") as f:
-        content = f.read()
-    key_md5 = hashlib.md5(content + local_path.encode('utf-8')).hexdigest()
-    return key_md5
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    hash_md5.update(local_path.encode('utf-8'))
+    return hash_md5.hexdigest()
 
 def upload_single_file(args):
     root, filename, exclude_patterns, quiet, pbar = args

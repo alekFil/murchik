@@ -11,3 +11,11 @@ python upload.py --upload C:\Users\filat\Documents\murchik\test_upload\bytes --t
 
 
 python download_restore.py --download C:\Users\filat\Documents\murchik\test_download --show-count
+
+
+python list_s3_paths.py --output s3_paths.txt
+
+
+python list_s3_paths.py --output s3_paths.txt --filter "Videos" --filter "Documents"
+
+python list_s3_paths.py --output s3_paths.txt --threads 32 --filter "Videos"
